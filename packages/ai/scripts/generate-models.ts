@@ -170,6 +170,14 @@ interface AiGatewayModel {
 	};
 }
 
+interface CommandCodeModelListItem {
+	id: string;
+	name?: string;
+	context_length?: number;
+	/** Routes that serve this model: "/chat/completions", "/responses", "/messages". */
+	supported_endpoints?: string[];
+}
+
 const COPILOT_STATIC_HEADERS = {
 	"User-Agent": "GitHubCopilotChat/0.35.0",
 	"Editor-Version": "vscode/1.107.0",
@@ -272,6 +280,134 @@ const OPENCODE_GO_GLM52_THINKING_LEVEL_MAP = {
 	high: "high",
 	max: "max",
 } as const;
+// The Anthropic SDK appends /v1/messages, the OpenAI SDKs append /chat/completions
+// and /responses, so the two families need different roots of the same gateway.
+const COMMAND_CODE_BASE_URL = "https://api.commandcode.ai/provider";
+const COMMAND_CODE_OPENAI_BASE_URL = `${COMMAND_CODE_BASE_URL}/v1`;
+const COMMAND_CODE_MODELS_URL = `${COMMAND_CODE_OPENAI_BASE_URL}/models`;
+// Command Code fans a single Chat Completions route out to many upstreams, and
+// several of them (Qwen, GLM-5.2, Kimi K2.7 Code) reject the `developer` role
+// pi sends to reasoning models: "developer is not one of ['system', ...]".
+// `system` is accepted everywhere, so the whole route uses it.
+const COMMAND_CODE_OPENAI_COMPAT: OpenAICompletionsCompat = {
+	supportsDeveloperRole: false,
+	maxTokensField: "max_tokens",
+};
+// Command Code's /models endpoint carries ids, names, context and routing but no
+// prices, so rates come from its published table at
+// https://commandcode.ai/docs/resources/pricing-limits (per 1M tokens, deal rates
+// where a deal is active). models.dev has no command-code provider entry, so there
+// is nothing upstream to read these from.
+const COMMAND_CODE_COSTS: Record<string, Model<Api>["cost"]> = {
+	"claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+	"claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+	"claude-haiku-4-5-20251001": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+	"claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+	"claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+	"claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+	"claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	"claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+	// DeepSeek V4 rates are the off-peak half; peak (01-04 & 06-10 UTC, Mon-Fri) doubles input/output.
+	"deepseek/deepseek-v4-flash": { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+	"deepseek/deepseek-v4-flash-fast": { input: 0.28, output: 0.56, cacheRead: 0.07, cacheWrite: 0 },
+	"deepseek/deepseek-v4-flash-vision-exp": { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+	"deepseek/deepseek-v4-pro": { input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 },
+	"deepseek/deepseek-v4.1-flash": { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+	"google/gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cacheRead: 0.03, cacheWrite: 0 },
+	"google/gemini-3.5-flash": { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
+	"google/gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
+	"google/gemini-3.6-flash": { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+	"google/gemini-3.7-flash": { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0.08334 },
+	"google/gemini-3.8-flash": { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+	"gpt-5.3-codex": { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 0 },
+	"gpt-5.4": { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+	"gpt-5.4-mini": { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+	"gpt-5.5": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+	"gpt-5.6-luna": { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+	"gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+	"gpt-5.6-terra": { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
+	"inclusionai/ling-3.0-flash-sante:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	"meituan/LongCat-2.0": { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+	"meta/muse-spark-1.1": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	"meta/muse-spark-1.2": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	"meta/muse-spark-1.2-contributor": { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+	"meta/muse-spark-1.3": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	"meta/muse-spark-1.3-contributor": { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+	"MiniMaxAI/MiniMax-M2.5": { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
+	"MiniMaxAI/MiniMax-M2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+	"MiniMaxAI/MiniMax-M3": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+	"moonshotai/Kimi-K2.5": { input: 0.6, output: 3, cacheRead: 0.1, cacheWrite: 0 },
+	"moonshotai/Kimi-K2.6": { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+	"moonshotai/Kimi-K2.7-Code": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+	"moonshotai/Kimi-K2.7-Code-Highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
+	"moonshotai/Kimi-K3": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+	"nvidia/nemotron-3-ultra-550b-a55b": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
+	"poolside/laguna-s-2.1-free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	"Qwen/Qwen3.6-Max-Preview": { input: 1.3, output: 7.8, cacheRead: 0.26, cacheWrite: 1.63 },
+	"Qwen/Qwen3.6-Plus": { input: 0.5, output: 3, cacheRead: 0.1, cacheWrite: 0 },
+	"Qwen/Qwen3.7-Flash": { input: 0.03, output: 0.13, cacheRead: 0.006, cacheWrite: 0.038 },
+	"Qwen/Qwen3.7-Max": { input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.13 },
+	"Qwen/Qwen3.7-Plus": { input: 0.4, output: 1.6, cacheRead: 0.08, cacheWrite: 0.5 },
+	"Qwen/Qwen3.8-27B": { input: 0.4, output: 3, cacheRead: 0.04, cacheWrite: 0 },
+	"Qwen/Qwen3.8-Flash": { input: 0.16, output: 0.47, cacheRead: 0.016, cacheWrite: 0 },
+	"Qwen/Qwen3.8-Max": { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 },
+	"Qwen/Qwen3.8-Max-0902": { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 0 },
+	"Qwen/Qwen3.8-Omni-Flash": { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0 },
+	"sakana/fugu-ultra": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+	"stepfun/Step-3.5-Flash": { input: 0.1, output: 0.3, cacheRead: 0.02, cacheWrite: 0 },
+	"stepfun/Step-3.7-Flash": { input: 0.2, output: 1.15, cacheRead: 0.04, cacheWrite: 0 },
+	"tencent/hy3-paid": { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 },
+	"tencent/hy4-preview": { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
+	"thinkingmachines/inkling": { input: 1, output: 4.05, cacheRead: 0.17, cacheWrite: 0 },
+	"thinkingmachines/inkling-small": { input: 0.5, output: 1.2, cacheRead: 0.1, cacheWrite: 0 },
+	"xai/grok-4.5": { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+	"xai/grok-4.6": { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+	"xiaomi/mimo-v2.5": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	"xiaomi/mimo-v2.5-pro": { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
+	"z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+	"z-ai/glm-5.3-flashx": { input: 0.37, output: 1.25, cacheRead: 0.075, cacheWrite: 0 },
+	"zai-org/GLM-5": { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
+	"zai-org/GLM-5.1": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+	"zai-org/GLM-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+	"zai-org/GLM-5.2-Fast": { input: 3, output: 10.25, cacheRead: 0.5, cacheWrite: 0 },
+	"zai-org/GLM-5.3": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+};
+// Command Code ids match models.dev ids exactly for 69 of 71 models, which is
+// where output limits, vision and reasoning flags come from. These two are
+// Command Code deployment variants of a model models.dev lists under another id.
+const COMMAND_CODE_METADATA_ALIASES: Record<string, string> = {
+	"deepseek/deepseek-v4-flash-fast": "deepseek/deepseek-v4-flash",
+	"tencent/hy3-paid": "tencent/hy3",
+};
+// Preferred source when several models.dev providers serve the same id: the
+// vendor of record first, then the aggregators, so metadata does not come from
+// whichever reseller happens to sort first.
+const COMMAND_CODE_METADATA_PROVIDERS = [
+	"anthropic",
+	"openai",
+	"google",
+	"deepseek",
+	"moonshotai",
+	"alibaba",
+	"z-ai",
+	"zai",
+	"zhipuai",
+	"xai",
+	"minimax",
+	"stepfun",
+	"tencent",
+	"nvidia",
+	"meta",
+	"xiaomi",
+	"poolside",
+	"sakana",
+	"thinkingmachines",
+	"inclusionai",
+	"meituan",
+	"opencode",
+	"openrouter",
+];
+const COMMAND_CODE_FALLBACK_MAX_TOKENS = 16384;
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
 	"github-copilot:claude-sonnet-4",
@@ -1367,6 +1503,83 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 	}
 }
 
+/** Best models.dev entry for a Command Code model id, for the metadata its own catalog omits. */
+function findCommandCodeMetadata(modelId: string): ModelsDevModel | undefined {
+	if (!modelsDevCatalog) return undefined;
+	const lookupId = (COMMAND_CODE_METADATA_ALIASES[modelId] ?? modelId).toLowerCase();
+	const candidates: { provider: string; model: ModelsDevModel }[] = [];
+	for (const [provider, providerData] of Object.entries(modelsDevCatalog)) {
+		for (const [id, model] of Object.entries(providerData?.models ?? {})) {
+			if (id.toLowerCase() === lookupId) candidates.push({ provider, model: model as ModelsDevModel });
+		}
+	}
+	candidates.sort((a, b) => {
+		const rankA = COMMAND_CODE_METADATA_PROVIDERS.indexOf(a.provider);
+		const rankB = COMMAND_CODE_METADATA_PROVIDERS.indexOf(b.provider);
+		return (
+			(rankA < 0 ? COMMAND_CODE_METADATA_PROVIDERS.length : rankA) -
+				(rankB < 0 ? COMMAND_CODE_METADATA_PROVIDERS.length : rankB) || a.provider.localeCompare(b.provider)
+		);
+	});
+	return candidates.find((candidate) => candidate.model.limit?.output)?.model ?? candidates[0]?.model;
+}
+
+async function fetchCommandCodeModels(): Promise<Model<Api>[]> {
+	try {
+		console.log("Fetching models from Command Code API...");
+		const response = await fetch(COMMAND_CODE_MODELS_URL);
+		if (!response.ok) throw new Error(`Command Code API returned ${response.status}`);
+		const data = (await response.json()) as { data?: CommandCodeModelListItem[] };
+		const items = Array.isArray(data.data) ? data.data : [];
+		if (items.length === 0) throw new Error("Command Code API returned no models");
+
+		const models: Model<Api>[] = [];
+		const missingCosts: string[] = [];
+		for (const item of items) {
+			const endpoints = item.supported_endpoints ?? [];
+			// Claude answers on /messages only; everything else answers on
+			// /chat/completions, and most of those on /responses as well. Route the
+			// OpenAI-native ids through Responses and leave the open models on
+			// Chat Completions, where the compat knobs for their thinking formats live.
+			const isAnthropic = endpoints.includes("/messages");
+			const useResponses = !isAnthropic && endpoints.includes("/responses") && item.id.startsWith("gpt-");
+			const api: Api = isAnthropic ? "anthropic-messages" : useResponses ? "openai-responses" : "openai-completions";
+			if (!isAnthropic && !endpoints.includes("/chat/completions") && !useResponses) continue;
+
+			const cost = COMMAND_CODE_COSTS[item.id];
+			if (!cost) missingCosts.push(item.id);
+			const metadata = findCommandCodeMetadata(item.id);
+
+			models.push({
+				id: item.id,
+				name: item.name || item.id,
+				api,
+				provider: "command-code",
+				baseUrl: isAnthropic ? COMMAND_CODE_BASE_URL : COMMAND_CODE_OPENAI_BASE_URL,
+				reasoning: metadata?.reasoning === true,
+				input: metadata?.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+				...(api === "openai-completions" ? { compat: { ...COMMAND_CODE_OPENAI_COMPAT } } : {}),
+				cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: item.context_length || 4096,
+				maxTokens: metadata?.limit?.output || COMMAND_CODE_FALLBACK_MAX_TOKENS,
+			});
+		}
+
+		if (missingCosts.length > 0) {
+			const message = `Command Code models missing from COMMAND_CODE_COSTS: ${missingCosts.join(", ")}`;
+			console.error(message);
+			if (generatorOptions.strict) throw new Error(message);
+		}
+
+		console.log(`Fetched ${models.length} models from Command Code`);
+		return models;
+	} catch (error) {
+		console.error("Failed to fetch Command Code models:", error);
+		if (generatorOptions.strict) throw error;
+		return [];
+	}
+}
+
 function processZaiModels(data: ModelsDevCatalog): Model<Api>[] {
 	const variants = [
 		{
@@ -1691,12 +1904,16 @@ function processFireworksModels(provider: ModelsDevProvider | undefined): Model<
 	return models;
 }
 
+/** Raw models.dev catalog, kept for providers that join against it by model id. */
+let modelsDevCatalog: ModelsDevCatalog | undefined;
+
 async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
 		if (!response.ok) throw new Error(`models.dev API returned ${response.status}`);
 		const data = (await response.json()) as ModelsDevCatalog;
+		modelsDevCatalog = data;
 
 		const models: Model<any>[] = [];
 		const nvidiaNimModelIds = data.nvidia?.models ? await fetchNvidiaNimModelIds() : new Map<string, string>();
@@ -2589,13 +2806,22 @@ async function generateModels() {
 	// OpenRouter: its tool-capable routed catalog
 	// AI Gateway: OpenAI-compatible catalog with tool-capable models
 	// Radius: its unauthenticated public catalog; authenticated clients overlay it at runtime
+	// Command Code: its unauthenticated /models catalog, joined to models.dev for output
+	// limits and modality flags its own endpoint omits
 	const modelsDevModels = await loadModelsDevData();
 	const openRouterModels = await fetchOpenRouterModels();
 	const aiGatewayModels = await fetchAiGatewayModels();
 	const radiusModels = await fetchRadiusModels();
+	const commandCodeModels = await fetchCommandCodeModels();
 
 	// Combine models (models.dev has priority where sources overlap).
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...radiusModels].filter(
+	const allModels = [
+		...modelsDevModels,
+		...openRouterModels,
+		...aiGatewayModels,
+		...radiusModels,
+		...commandCodeModels,
+	].filter(
 		(model) =>
 			!(model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) &&
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),

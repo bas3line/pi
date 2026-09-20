@@ -70,6 +70,12 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		return ["COPILOT_GITHUB_TOKEN"];
 	}
 
+	// CMD_API_KEY is what the Command Code docs tell you to export; the namespaced
+	// name is accepted too, for shells that already use CMD_API_KEY for something else.
+	if (provider === "command-code") {
+		return ["CMD_API_KEY", "COMMAND_CODE_API_KEY"];
+	}
+
 	// ANTHROPIC_AUTH_TOKEN participates in env discovery/status, but
 	// getEnvApiKey() skips it because requests must pass it as Authorization: Bearer.
 	if (provider === "anthropic") {

@@ -88,6 +88,7 @@ pi
 | ZAI Coding Plan (China) | `ZAI_CODING_CN_API_KEY` | `zai-coding-cn` |
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` |
+| Command Code | `CMD_API_KEY` (or `COMMAND_CODE_API_KEY`) | `command-code` |
 | Radius | `RADIUS_API_KEY` | `radius` |
 | Hugging Face | `HF_TOKEN` | `huggingface` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
@@ -120,6 +121,7 @@ Store credentials in `~/.pi/agent/auth.json`:
   "google": { "type": "api_key", "key": "..." },
   "opencode": { "type": "api_key", "key": "..." },
   "opencode-go": { "type": "api_key", "key": "..." },
+  "command-code": { "type": "api_key", "key": "..." },
   "together": { "type": "api_key", "key": "..." },
   "qwen-token-plan":  { "type": "api_key", "key": "sk-sp-..." },
   "qwen-token-plan-individual": { "type": "api_key", "key": "sk-sp-..." },
@@ -246,6 +248,21 @@ export AWS_BEDROCK_SKIP_AUTH=1
 # Set if your proxy only supports HTTP/1.1
 export AWS_BEDROCK_FORCE_HTTP1=1
 ```
+
+### Command Code
+
+One key reaches all 71 Command Code models. Create it from Studio's API keys page; the same key authenticates the Command Code CLI and its provider API.
+
+```bash
+export CMD_API_KEY=...                  # or use /login command-code
+pi --provider command-code --model claude-sonnet-5
+```
+
+Each model answers on one API, and pi routes accordingly: Claude models use Anthropic Messages (`/v1/messages`), the GPT models use OpenAI Responses (`/v1/responses`), and the open models use OpenAI Chat Completions (`/v1/chat/completions`). Sending a model to the wrong route returns a 400, so the catalog pins each model to the route its own `/models` endpoint reports.
+
+Set `CMD_ZDR=1` to add the `x-cmd-zdr: 1` header to every request, the same opt-in the Command Code CLI exposes. Requests then route only through zero-data-retention upstreams, or fail with 422 `cmd_zdr_no_providers` rather than falling back to one that retains data. Turning it on can change which upstream serves a request, so it may cost more.
+
+Per-token rates ship with the catalog, taken from the published [pricing table](https://commandcode.ai/docs/resources/pricing-limits#models). Deal rates are included where a deal is active, and DeepSeek V4 rates are the off-peak half — peak hours (01:00–04:00 and 06:00–10:00 UTC, Mon–Fri) bill double, which pi's session cost does not model.
 
 ### Cloudflare AI Gateway
 
